@@ -267,46 +267,86 @@ export default function CameraRecorder({
 
   // Enumerate camera devices
   useEffect(() => {
-    navigator.mediaDevices.enumerateDevices()
-      .then(deviceList => {
+    const initCameraAccess = async () => {
+      try {
+        // Request video permission first to prompt standard user interaction flow
+        let initialStream: MediaStream | null = null;
+        try {
+          initialStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (e: any) {
+          addLog('warning', `Không thể tự kích hoạt camera: ${e.message}. Vui lòng đồng ý cấp quyền khi được trình duyệt hỏi.`);
+        }
+        
+        // GIẢI PHÓNG luồng nháp ngay lập tức trước khi phân tích thiết bị và kích hoạt camera chính thức
+        if (initialStream) {
+          initialStream.getTracks().forEach(track => track.stop());
+        }
+        
+        const deviceList = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = deviceList.filter(d => d.kind === 'videoinput');
         setDevices(videoDevices);
         if (videoDevices.length > 0) {
           setSelectedDevice(videoDevices[0].deviceId);
         }
         addLog('info', `Tìm thấy ${videoDevices.length} thiết bị camera khả dụng.`);
-      })
-      .catch(err => {
-        addLog('error', `Không thể truy cập danh sách Camera: ${err.message}`);
-      });
+      } catch (err: any) {
+        addLog('error', `Lỗi liệt kê camera: ${err.message}`);
+      }
+    };
+
+    initCameraAccess();
   }, []);
 
   // Set up camera stream
   const startCamera = async (deviceId: string) => {
     stopCamera();
+    let stream: MediaStream | null = null;
+    let fallbackToNoAudio = false;
+
     try {
       const constraints: MediaStreamConstraints = {
         video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } : { width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: true
       };
-      
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(e => console.warn("Lỗi phát video auto:", e));
-      }
-      setCameraActive(true);
-      addLog('success', `Đã kết nối thành công với Camera.`);
-      
-      // Khởi động luồng quét barcode ở đây nếu đang bật chế độ quét tự động bằng camera
-      if (config.scanMode === 'camera') {
-        startScannerDaemon(stream);
-      } else {
-        addLog('info', `Đã kết nối luồng camera. Quy trình phân tích ảnh ẩn (Quét ảnh camera đang tắt).`);
-      }
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (err: any) {
-      addLog('error', `Error Camera: ${err.message}. Đã bật chế độ giả lập Camera phòng hờ.`);
-      setCameraActive(false);
+      addLog('warning', `Thử nghiệm camera có âm thanh thất bại (${err.message}). Đang chuyển sang Chế độ không có ghi âm...`);
+      fallbackToNoAudio = true;
+    }
+
+    if (fallbackToNoAudio) {
+      try {
+        const constraints: MediaStreamConstraints = {
+          video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } : { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err: any) {
+        addLog('error', `Lỗi khởi chạy nguồn video camera: ${err.message}. Đã chuyển sang chế độ Mô Phỏng/Giả Lập.`);
+        setCameraActive(false);
+        return;
+      }
+    }
+
+    if (stream) {
+      try {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(e => console.warn("Lỗi phát video auto:", e));
+        }
+        setCameraActive(true);
+        addLog('success', `Đã kết nối thành công với Camera${fallbackToNoAudio ? ' (Không thu âm)' : ' (Có kèm thu âm)'}.`);
+        
+        // Khởi động luồng quét barcode ở đây nếu đang bật chế độ quét tự động bằng camera
+        if (config.scanMode === 'camera') {
+          startScannerDaemon(stream);
+        } else {
+          addLog('info', `Đã kết nối luồng camera. Quy trình phân tích ảnh ẩn (Quét ảnh camera đang tắt).`);
+        }
+      } catch (err: any) {
+        addLog('error', `Lỗi đồng bộ nguồn phát: ${err.message}`);
+        setCameraActive(false);
+      }
     }
   };
 
@@ -640,14 +680,13 @@ export default function CameraRecorder({
 
         {/* Live Camera Feed Canvas */}
         <div className="relative aspect-video bg-black flex items-center justify-center">
-          {cameraActive ? (
-            <video 
-              ref={videoRef} 
-              muted 
-              playsInline 
-              className="w-full h-full object-cover"
-            />
-          ) : (
+          <video 
+            ref={videoRef} 
+            muted 
+            playsInline 
+            className={`w-full h-full object-cover ${cameraActive ? 'block' : 'hidden'}`}
+          />
+          {!cameraActive && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 p-6 text-center">
               <div className="w-14 h-14 rounded-full bg-rose-500/15 border border-rose-500/30 flex items-center justify-center text-rose-400 animate-pulse">
                 <Video size={28} />
@@ -676,8 +715,8 @@ export default function CameraRecorder({
                   </a>
                   <button 
                     onClick={() => {
-                      // Trigger enumerate devices manually
-                      navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+                      // Trigger enumerate devices manually - fallback video only
+                      navigator.mediaDevices.getUserMedia({ video: true })
                         .then(() => {
                           window.location.reload();
                         })
